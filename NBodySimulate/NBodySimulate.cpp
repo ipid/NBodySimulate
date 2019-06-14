@@ -208,9 +208,9 @@ void gen_body(Body& vBody) {
 
 void worker(const Settings& setting, int rank, int size) {
     // 1. 生成天体
-    Body* all_bodies = nullptr;
+    std::unique_ptr<Body[]> all_bodies;
     if (rank == 0) {
-        all_bodies = new Body[setting.bodyNum];
+        all_bodies.reset(new Body[setting.bodyNum]);
 
         for (int i = 0; i < setting.bodyNum; i++) {
             gen_body(all_bodies[i]);
@@ -219,7 +219,7 @@ void worker(const Settings& setting, int rank, int size) {
 
     // 2. 广播天体信息
     size_t bodyNumEach = setting.bodyNum / size;
-    Body* myBodies = new Body[bodyNumEach];
+    auto myBodies = std::make_unique<Body[]>(bodyNumEach);
     if (rank == 0) {
         for (int i = 1; i < size; i++) {
             size_t itsBody = i * bodyNumEach;
@@ -227,21 +227,23 @@ void worker(const Settings& setting, int rank, int size) {
                 static_cast<int>(bodyNumEach * sizeof(Body)), MPI_BYTE,
                 i, 0, MPI_COMM_WORLD);
         }
-        std::copy(all_bodies, all_bodies + bodyNumEach, myBodies);
+        std::copy(all_bodies.get(), all_bodies.get() + bodyNumEach, myBodies.get());
     } else {
         MPI_Recv(&myBodies, static_cast<int>(bodyNumEach * sizeof(Body)), MPI_BYTE,
             0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
 
-    // 3. 建树
-    BHPool* bhPool = nullptr;
 
-    if (rank == 0) {
-        BHPool* bhPool = new BHPool(setting.bodyNum);
-        for (int i = 0; i < setting.bodyNum; i++) {
-            bhPool->insert(all_bodies[i]);
-        }
-    }
+
+    //// 3. 建树
+    //BHPool* bhPool = nullptr;
+
+    //if (rank == 0) {
+    //    BHPool* bhPool = new BHPool(setting.bodyNum);
+    //    for (int i = 0; i < setting.bodyNum; i++) {
+    //        bhPool->insert(all_bodies[i]);
+    //    }
+    //}
 }
 
 int mpi_main(int argc, char* argv[]) {
