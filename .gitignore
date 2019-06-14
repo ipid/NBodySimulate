@@ -1,0 +1,10 @@
+/.vs/
+/x64/
+/NBodySimulate/x64/
+*.sln
+*.vcxproj
+*.vcxproj.*
+*.exe
+*.pch
+*.ipch
+*.obj
