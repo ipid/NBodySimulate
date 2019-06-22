@@ -152,6 +152,7 @@ struct BHNode {
 
 struct Settings {
     size_t bodyNum = SIZE_MAX;
+	size_t iterations = SIZE_MAX;
 };
 
 enum class Quadrant {

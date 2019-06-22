@@ -10,12 +10,22 @@ constexpr bool DEBUG_MODE = false;
 // 打开时会运行测试代码
 constexpr bool TEST_MODE = false;
 
+// 打开此开关可以只测试性能，不输出天体结果
+constexpr bool BENCHMARK_ONLY_AND_DO_NOT_PRINT_BODY_RESULT = true;
+
 // 万有引力常数
 constexpr double GRAVITY_CONST = 6.672e-11;
 
 constexpr double THETA = 0.5, MASS_RATIO = 1000;
 constexpr double MOTION_DELTA_TIME = 1.0;
 constexpr int INDENT = 2;
+
+enum Messages : int {
+    InitialBodyInfo = 0,
+    NodeNumOfCurrentIter,
+    RawNodesOfCurrentIter,
+    SlaveBodyStatus
+};
 
 template <class T>
 constexpr int int_sizeof(const T& elem, size_t num) {
@@ -25,6 +35,18 @@ constexpr int int_sizeof(const T& elem, size_t num) {
 template <class T>
 constexpr int int_sizeof(size_t num) {
     return static_cast<int>(num * sizeof(T));
+}
+
+void print_body_status(const Body body[], const size_t bodyNum) {
+    for (size_t i = 0; i < bodyNum; i++) {
+        std::cout << body[i].pos.x << ' ' << body[i].pos.y << ' ';
+    }
+    std::cout << std::endl;
+}
+
+// 超出边界范围的 body 不应被迭代
+bool should_body_be_calculated(const Body& body) {
+    return (body.pos.x > .0 && body.pos.y > .0 && body.pos.x < 1.0 && body.pos.y < 1.0);
 }
 
 void put_spaces(size_t spaceNum) {
@@ -116,6 +138,9 @@ public:
 
     // 返回 Body 受到其它天体的引力之合力。
     Vector2 gravity(const Body& body) const {
+        if (!should_body_be_calculated(body)) {
+            return { .0, .0 };
+        }
         return this->gravity_from_node(body, 0, 1.0);
     }
 
@@ -183,7 +208,9 @@ public:
     }
 
     void insert(const Body& body) {
-        insert_on_node(body, 0, Vector2 { 0, 0 }, Vector2 { 1, 1 });
+        if (should_body_be_calculated(body)) {
+            insert_on_node(body, 0, Vector2 { 0, 0 }, Vector2 { 1, 1 });
+        }
     }
 
     BHNode& operator[](const size_t nodeId) {
@@ -292,6 +319,10 @@ void update_body_status(const BHPoolUtility& util,
     Body myBodies[], size_t bodyNumEach, double delta_time = MOTION_DELTA_TIME) {
 
     for (int i = 0; i < bodyNumEach; i++) {
+        if (!should_body_be_calculated(myBodies[i])) {
+            continue;
+        }
+
         Vector2 gravity = util.gravity(myBodies[i]);
         myBodies[i].move_under_force(gravity, delta_time);
     }
@@ -305,14 +336,20 @@ void update_body_status(const BHPoolUtility& util,
 void worker(const Settings& setting, int rank, int size) {
     std::unique_ptr<Body[]> allBodies;
 
-    // 1. [root] 生成天体
+    // 1. [root] 生成天体，并打印初始天体信息
     if (rank == 0) {
         allBodies = std::make_unique<Body[]>(setting.bodyNum);
         generate_bodies(allBodies.get(), setting.bodyNum);
+
+        if constexpr (!BENCHMARK_ONLY_AND_DO_NOT_PRINT_BODY_RESULT) {
+            print_body_status(allBodies.get(), setting.bodyNum);
+        } else {
+            std::cout << "Begin: " << MPI_Wtime() << std::endl;
+        }
     }
 
     // 2. [root] 逐个发送天体信息 / [slave] 接收天体信息
-    size_t bodyNumEach = setting.bodyNum / size;
+    const size_t bodyNumEach = setting.bodyNum / size;
     auto myBodies = std::make_unique<Body[]>(bodyNumEach);
     if (rank == 0) {
         for (int slave = 1; slave < size; slave++) {
@@ -321,62 +358,71 @@ void worker(const Settings& setting, int rank, int size) {
             size_t firstBodyOfSlave = slave * bodyNumEach;
             MPI_Send(&allBodies[firstBodyOfSlave],
                 int_sizeof<Body>(bodyNumEach), MPI_BYTE,
-                slave, 0, MPI_COMM_WORLD);
+                slave, InitialBodyInfo, MPI_COMM_WORLD);
         }
         std::copy(allBodies.get(), allBodies.get() + bodyNumEach, myBodies.get());
     } else {
         // 接收属于当前节点的天体信息
         MPI_Recv(myBodies.get(), int_sizeof<Body>(bodyNumEach), MPI_BYTE,
-            0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            0, InitialBodyInfo, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
 
-    // 3. [root] 建立所有天体的 Barnes-Hut 树
-    std::unique_ptr<BHNode[]> rawNodes;
-    size_t nodeNum = std::numeric_limits<size_t>::max();
+    // 循环进行 3 - 6 的操作
+    for (size_t currentIter = 0; currentIter < setting.iterations; currentIter++) {
 
-    if (rank == 0) {
-        BHPool pool;
-        for (int i = 0; i < setting.bodyNum; i++) {
-            pool.insert(allBodies[i]);
+        // 3. [root] 建立所有天体的 Barnes-Hut 树
+        std::unique_ptr<BHNode[]> rawNodes;
+        size_t nodeNum = std::numeric_limits<size_t>::max();
+
+        if (rank == 0) {
+            BHPool pool;
+            for (int i = 0; i < setting.bodyNum; i++) {
+                pool.insert(allBodies[i]);
+            }
+
+            nodeNum = pool.node_num();
+            MPI_Bcast(&nodeNum, sizeof(nodeNum), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+            rawNodes = pool.export_raw_nodes_copy();
+            MPI_Bcast(rawNodes.get(), int_sizeof<BHNode>(nodeNum), MPI_BYTE, 0, MPI_COMM_WORLD);
+        } else {
+            MPI_Bcast(&nodeNum, sizeof(nodeNum), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+            rawNodes = std::make_unique<BHNode[]>(nodeNum);
+            MPI_Bcast(rawNodes.get(), int_sizeof<BHNode>(nodeNum), MPI_BYTE, 0, MPI_COMM_WORLD);
         }
 
-        nodeNum = pool.node_num();
-        MPI_Bcast(&nodeNum, sizeof(nodeNum), MPI_BYTE, 0, MPI_COMM_WORLD);
+        BHPoolUtility utility(rawNodes.get(), nodeNum);
 
-        rawNodes = pool.export_raw_nodes_copy();
-        MPI_Bcast(rawNodes.get(), int_sizeof<BHNode>(nodeNum), MPI_BYTE, 0, MPI_COMM_WORLD);
-    } else {
-        MPI_Bcast(&nodeNum, sizeof(nodeNum), MPI_BYTE, 0, MPI_COMM_WORLD);
+        // 4. [worker] 计算每个天体的下一 DELTA_TIME 状态
+        update_body_status(utility, myBodies.get(), bodyNumEach);
 
-        rawNodes = std::make_unique<BHNode[]>(nodeNum);
-        MPI_Bcast(rawNodes.get(), int_sizeof<BHNode>(nodeNum), MPI_BYTE, 0, MPI_COMM_WORLD);
+        // 5. [root] 将天体状态存入 allBodies、接收天体状态 / [slave] 将天体状态发给 root
+        if (rank == 0) {
+            std::copy(&myBodies[0], myBodies.get() + bodyNumEach, &allBodies[0]);
+
+            for (int slave = 1; slave < size; slave++) {
+                size_t firstBodyOfSlave = slave * bodyNumEach;
+
+                MPI_Recv(&allBodies[firstBodyOfSlave], int_sizeof<Body>(bodyNumEach), MPI_BYTE,
+                    slave, SlaveBodyStatus, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
+        } else {
+            MPI_Send(&myBodies[0], int_sizeof<Body>(bodyNumEach), MPI_BYTE, 0, SlaveBodyStatus, MPI_COMM_WORLD);
+        }
+
+        // 6. [root] 输出天体当前状态
+        if constexpr (!BENCHMARK_ONLY_AND_DO_NOT_PRINT_BODY_RESULT) {
+            if (rank == 0) {
+                print_body_status(allBodies.get(), setting.bodyNum);
+            }
+        }
     }
 
-    BHPoolUtility utility(rawNodes.get(), nodeNum);
-
-    // 4. [worker] 计算每个天体的下一 DELTA_TIME 状态
-    update_body_status(utility, myBodies.get(), bodyNumEach);
-
-    // 5. [root] 将天体状态存入 allBodies、接收天体状态 / [slave] 将天体状态发给 root
-    if (rank == 0) {
-        std::copy(&myBodies[0], myBodies.get() + bodyNumEach, &allBodies[0]);
-
-        for (int slave = 0; slave < rank; slave++) {
-            size_t firstBodyOfSlave = slave * bodyNumEach;
-
-            MPI_Recv(&allBodies[firstBodyOfSlave], int_sizeof<Body>(bodyNumEach), MPI_BYTE,
-                slave, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    if constexpr (BENCHMARK_ONLY_AND_DO_NOT_PRINT_BODY_RESULT) {
+        if (rank == 0) {
+            std::cout << "Finish: " << MPI_Wtime() << std::endl;
         }
-    } else {
-        MPI_Send(&myBodies[0], int_sizeof<Body>(bodyNumEach), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
-    }
-
-    // 6. [root] 输出天体当前状态
-    if (rank == 0) {
-        for (size_t i = 0; i < setting.bodyNum; i++) {
-            std::cout << allBodies[i].pos.x << ' ' << allBodies[i].pos.y << ' ';
-        }
-        std::cout << std::endl;
     }
 }
 
@@ -390,6 +436,7 @@ int mpi_main(int argc, char* argv[]) {
 
     Settings setting = { 0 };
     if (rank == 0) {
+        // 1. 设置天体个数
         std::cout << "Body Num: ";
         std::cin >> setting.bodyNum;
 
@@ -409,17 +456,28 @@ int mpi_main(int argc, char* argv[]) {
                       << std::endl;
             return -1;
         }
+
+        // 2. 设置迭代次数
+        std::cout << "Iteration: ";
+        std::cin >> setting.iterations;
+
+        if (setting.iterations < 3) {
+            std::cout << "ERROR: Iteration time must be more than 3 times.\nExit...\n"
+                      << std::endl;
+            return -1;
+        }
     }
     // 广播基础设定
     MPI_Bcast(&setting, sizeof(setting), MPI_BYTE, 0, MPI_COMM_WORLD);
 
+    // 初始化完毕，开始工作
     worker(setting, rank, size);
 
-    std::cout << "[" << rank << "] MPI_Finalize();" << std::endl;
     MPI_Finalize();
     return 0;
 }
 
+// BHPool 的测试代码，测试树是否能正确建立
 void bhpool_test() {
     BHPool pool;
     std::vector<Body> bodies;
@@ -448,6 +506,7 @@ void bhpool_test() {
     utility.display_tree();
 }
 
+// 模拟一个双星系统，从而测试引力、BH 树、动量定理等代码
 void test_doubleStarSystem_ResultCorrect() {
     std::vector<Body> bodies;
     bodies.push_back(Body { { 0.5, 0.446624 }, { -0.5, .0 }, 8e8 });
@@ -473,7 +532,7 @@ void test_doubleStarSystem_ResultCorrect() {
 
 int main(int argc, char* argv[]) {
     // 尽可能高精度
-    std::cout.precision(9);
+    std::cout.precision(10);
 
     if constexpr (TEST_MODE) {
         // bhpool_test();
