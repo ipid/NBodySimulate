@@ -33,12 +33,6 @@ void put_spaces(size_t spaceNum) {
     }
 }
 
-void debug_execute_to(int rank, int line) {
-    if constexpr (DEBUG_MODE) {
-        std::cout << '[' << rank << "] Executed to " << line << std::endl;
-    }
-}
-
 // 获取 pos 在 (begin, end) 的区域内对应的
 Quadrant which_quadrant(const Vector2& pos,
     const Vector2& begin, const Vector2& end) {
@@ -324,10 +318,6 @@ void worker(const Settings& setting, int rank, int size) {
         for (int slave = 1; slave < size; slave++) {
             // 将属于第 slave 号 worker 的天体发给他
 
-            if constexpr (DEBUG_MODE) {
-                std::cout << "[0] send bodies to " << slave << std::endl;
-            }
-
             size_t firstBodyOfSlave = slave * bodyNumEach;
             MPI_Send(&allBodies[firstBodyOfSlave],
                 int_sizeof<Body>(bodyNumEach), MPI_BYTE,
@@ -340,25 +330,6 @@ void worker(const Settings& setting, int rank, int size) {
             0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
 
-    if constexpr (DEBUG_MODE) {
-        std::cout << "[" << rank << "] Exec to " << __LINE__ << std::endl;
-        // 输出当前节点收到的天体信息
-        if (rank == 0) {
-            std::cout << "[0] bodyNumEach = " << bodyNumEach;
-            for (int i = 0; i < setting.bodyNum; i++) {
-                std::cout << "\n[0] all_bodies[" << i << "].mass = " << allBodies[i].mass;
-            }
-            std::cout << std::endl;
-        }
-        std::cout << "[" << rank << "] Exec to " << __LINE__ << std::endl;
-
-        for (int i = 0; i < bodyNumEach; i++) {
-            std::cout << "\n[" << rank << "] myBodies[" << i << "].mass = " << myBodies[i].mass;
-        }
-        std::cout << std::endl;
-    }
-
-    debug_execute_to(rank, __LINE__);
     // 3. [root] 建立所有天体的 Barnes-Hut 树
     std::unique_ptr<BHNode[]> rawNodes;
     size_t nodeNum = std::numeric_limits<size_t>::max();
@@ -383,11 +354,9 @@ void worker(const Settings& setting, int rank, int size) {
 
     BHPoolUtility utility(rawNodes.get(), nodeNum);
 
-    debug_execute_to(rank, __LINE__);
     // 4. [worker] 计算每个天体的下一 DELTA_TIME 状态
     update_body_status(utility, myBodies.get(), bodyNumEach);
 
-    debug_execute_to(rank, __LINE__);
     // 5. [root] 将天体状态存入 allBodies、接收天体状态 / [slave] 将天体状态发给 root
     if (rank == 0) {
         std::copy(&myBodies[0], myBodies.get() + bodyNumEach, &allBodies[0]);
@@ -402,7 +371,6 @@ void worker(const Settings& setting, int rank, int size) {
         MPI_Send(&myBodies[0], int_sizeof<Body>(bodyNumEach), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
     }
 
-    debug_execute_to(rank, __LINE__);
     // 6. [root] 输出天体当前状态
     if (rank == 0) {
         for (size_t i = 0; i < setting.bodyNum; i++) {
