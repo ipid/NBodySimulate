@@ -5,6 +5,12 @@
 #include <cstdint>
 #include <chrono>
 
+// 万有引力常数
+constexpr double GRAVITY_CONST = 6.672e-11;
+
+// 圆周率值
+constexpr double PI_CONST = 3.14159265358979323;
+
 struct Vector2 {
     double x = 0, y = 0;
 

@@ -11,13 +11,10 @@ constexpr bool DEBUG_MODE = false;
 constexpr bool TEST_MODE = false;
 
 // 打开此开关可以只测试性能，不输出天体结果
-constexpr bool BENCHMARK_ONLY_AND_DO_NOT_PRINT_BODY_RESULT = true;
+constexpr bool BENCHMARK_ONLY_AND_DO_NOT_PRINT_BODY_RESULT = false;
 
-// 万有引力常数
-constexpr double GRAVITY_CONST = 6.672e-11;
-
-constexpr double THETA = 0.5, MASS_RATIO = 1000;
-constexpr double MOTION_DELTA_TIME = 1.0;
+constexpr double THETA = 0.25, MASS_RATIO = 1e4;
+constexpr double MOTION_DELTA_TIME = 0.1, INITIAL_VELOCITY = 0.02;
 constexpr int INDENT = 2;
 
 enum Messages : int {
@@ -37,16 +34,27 @@ constexpr int int_sizeof(size_t num) {
     return static_cast<int>(num * sizeof(T));
 }
 
-void print_body_status(const Body body[], const size_t bodyNum) {
-    for (size_t i = 0; i < bodyNum; i++) {
-        std::cout << body[i].pos.x << ' ' << body[i].pos.y << ' ';
-    }
-    std::cout << std::endl;
-}
-
-// 超出边界范围的 body 不应被迭代
+// 计算传入的 body 是否在大边界内
+// 超出边界范围的 body 不应参与计算
 bool should_body_be_calculated(const Body& body) {
     return (body.pos.x > .0 && body.pos.y > .0 && body.pos.x < 1.0 && body.pos.y < 1.0);
+}
+
+// 打印 body 数组中所有天体的位置信息
+// 超出边界的 body 位置用“-”表示
+bool print_body_status(const Body body[], const size_t bodyNum) {
+	bool isAnyBodyPrinted = false;
+
+    for (size_t i = 0; i < bodyNum; i++) {
+        if (should_body_be_calculated(body[i])) {
+            isAnyBodyPrinted = true;
+            std::cout << body[i].pos.x << ' ' << body[i].pos.y << ' ';
+        } else {
+            std::cout << "- - ";
+        }
+    }
+    std::cout << std::endl;
+    return isAnyBodyPrinted;
 }
 
 void put_spaces(size_t spaceNum) {
@@ -55,7 +63,7 @@ void put_spaces(size_t spaceNum) {
     }
 }
 
-// 获取 pos 在 (begin, end) 的区域内对应的
+// 获取 pos 在 (begin, end) 的区域内对应的象限
 Quadrant which_quadrant(const Vector2& pos,
     const Vector2& begin, const Vector2& end) {
 
@@ -82,6 +90,7 @@ Quadrant which_quadrant(const Vector2& pos,
     }
 }
 
+// 输入区域和象限 quadr，该函数将区域分为四个子区域，返回对应 quadr 象限的子区域
 std::pair<Vector2, Vector2> border_of_quadrant(const Vector2& begin,
     const Vector2& end, Quadrant quadr) {
 
@@ -124,6 +133,7 @@ Vector2 newton_gravity_AtoB(const Body& A, const Body& B) {
     return gravity;
 }
 
+// 使用已建立的Barnes-Hut树计算天体引力
 class BHPoolUtility {
 public:
     BHPoolUtility(BHNode nodes[], const size_t nodeNum)
@@ -153,6 +163,7 @@ private:
     BHNode* nodes;
     size_t nodeNum;
 
+	// 计算节点 node 对 body 产生的引力
     Vector2 gravity_from_node(const Body& body, const int16_t node, const double areaLength) const {
         if (nodes[node].vaBody == body) {
             return { .0, .0 };
@@ -175,11 +186,13 @@ private:
         return total;
     }
 
+	// node 在与 body 相互作用时，是否应被视为一整个物体
     bool treat_as_single_body(const Body& body, int16_t node, double areaLength) const {
         double dist = (nodes[node].vaBody.pos - body.pos).len();
         return (areaLength / dist) < THETA;
     }
 
+	// DEBUG: 打印当前 node 树
     void display_tree_from_node(int16_t node, int indent) const {
         put_spaces(indent);
         if (node < 0) {
@@ -197,6 +210,7 @@ private:
     }
 };
 
+// 建立Barnes-Hut树
 class BHPool {
 public:
     BHPool() {
@@ -207,22 +221,26 @@ public:
         nodes[0].internal = true;
     }
 
+	// 往树中插入天体信息
     void insert(const Body& body) {
         if (should_body_be_calculated(body)) {
             insert_on_node(body, 0, Vector2 { 0, 0 }, Vector2 { 1, 1 });
         }
     }
 
+	// 直接访问 nodeId 对应的 BH 树节点
     BHNode& operator[](const size_t nodeId) {
         return nodes[nodeId];
     }
 
+	// 复制一份内部的节点并返回
     std::unique_ptr<BHNode[]> export_raw_nodes_copy() {
         auto rawNodes = std::make_unique<BHNode[]>(nodes.size());
         std::copy(nodes.begin(), nodes.end(), rawNodes.get());
         return rawNodes;
     }
 
+	// 返回 BH 树节点数量
     size_t node_num() {
         return nodes.size();
     }
@@ -230,11 +248,13 @@ public:
 private:
     std::vector<BHNode> nodes;
 
+	// 动态创建 BH 树节点
     int16_t add() {
         nodes.push_back(BHNode {});
         return static_cast<int16_t>(nodes.size() - 1);
     }
 
+	// 在 node 上插入 body
     void insert_on_node(const Body& body, const int16_t node,
         const Vector2& begin, const Vector2& end) {
 
@@ -268,10 +288,10 @@ private:
             nodes[node].internal = true;
 
             // 取出 node 内的 body -> bodyInNode（此时 vaBody 为实际 body）
-            Body bodyInNote = nodes[node].vaBody;
+            Body bodyInNode = nodes[node].vaBody;
 
             // 插入（node, bodyInNode）
-            insert_on_node(bodyInNote, node, begin, end);
+            insert_on_node(bodyInNode, node, begin, end);
 
             // 插入（node，body）
             insert_on_node(body, node, begin, end);
@@ -281,6 +301,7 @@ private:
         update_mass_vpos(node);
     }
 
+	// 更新当前 node 上的虚拟天体信息
     void update_mass_vpos(const int16_t node) {
         Vector2 totalPosition;
         double totalMass = 0;
@@ -299,10 +320,14 @@ private:
     }
 };
 
+// 随机生成天体
+// 随机生成位置、质量、初始速度
 void generate_bodies(Body bodies[], size_t bodyNum) {
     std::mt19937_64 rnd { static_cast<uint64_t>(std::time(nullptr)) };
-    std::uniform_real_distribution<> disPos(0.0, 1.0);
-    std::uniform_real_distribution<> disMass(1.0, MASS_RATIO);
+
+    // 位置、质量、初始速度角度
+    std::uniform_real_distribution<> disPos(0.0, 1.0),
+        disMass(1.0, MASS_RATIO), disAngle(0, PI_CONST * 2);
 
     for (int i = 0; i < bodyNum; i++) {
         Body& vBody = bodies[i];
@@ -310,6 +335,11 @@ void generate_bodies(Body bodies[], size_t bodyNum) {
         vBody.pos.x = disPos(rnd);
         vBody.pos.y = disPos(rnd);
         vBody.mass = disMass(rnd);
+
+        // 初始速度大小固定，方向随机产生（单位为弧度）
+        double velocityAngle = disAngle(rnd);
+        vBody.v = { INITIAL_VELOCITY * std::cos(velocityAngle),
+            INITIAL_VELOCITY * std::sin(velocityAngle) };
     }
 }
 
@@ -334,6 +364,9 @@ void update_body_status(const BHPoolUtility& util,
 	[worker]：[root] + [slave] 全体进程都要做的事
 */
 void worker(const Settings& setting, int rank, int size) {
+    if (rank == 0) {
+        std::cout << "\n[BEGIN]" << std::endl;	
+	}
     std::unique_ptr<Body[]> allBodies;
 
     // 1. [root] 生成天体，并打印初始天体信息
@@ -360,6 +393,7 @@ void worker(const Settings& setting, int rank, int size) {
                 int_sizeof<Body>(bodyNumEach), MPI_BYTE,
                 slave, InitialBodyInfo, MPI_COMM_WORLD);
         }
+        // 将属于根节点的节点复制到 myBodies 中
         std::copy(allBodies.get(), allBodies.get() + bodyNumEach, myBodies.get());
     } else {
         // 接收属于当前节点的天体信息
@@ -418,6 +452,9 @@ void worker(const Settings& setting, int rank, int size) {
             }
         }
     }
+    if (rank == 0) {
+        std::cout << "[END]" << std::endl;
+    }
 
     if constexpr (BENCHMARK_ONLY_AND_DO_NOT_PRINT_BODY_RESULT) {
         if (rank == 0) {
@@ -434,7 +471,7 @@ int mpi_main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    Settings setting = { 0 };
+    Settings setting;
     if (rank == 0) {
         // 1. 设置天体个数
         std::cout << "Body Num: ";
@@ -477,7 +514,7 @@ int mpi_main(int argc, char* argv[]) {
     return 0;
 }
 
-// BHPool 的测试代码，测试树是否能正确建立
+// DEBUG: BHPool 的测试代码，测试树是否能正确建立
 void bhpool_test() {
     BHPool pool;
     std::vector<Body> bodies;
@@ -506,7 +543,7 @@ void bhpool_test() {
     utility.display_tree();
 }
 
-// 模拟一个双星系统，从而测试引力、BH 树、动量定理等代码
+// DEBUG: 模拟一个双星系统，从而测试引力、BH 树、动量定理等代码
 void test_doubleStarSystem_ResultCorrect() {
     std::vector<Body> bodies;
     bodies.push_back(Body { { 0.5, 0.446624 }, { -0.5, .0 }, 8e8 });

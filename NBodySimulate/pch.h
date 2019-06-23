@@ -8,6 +8,7 @@
 #include <ctime>
 #include <type_traits>
 #include <memory>
+#include <cmath>
 #include <utility>
 #include <vector>
 #include <cstdlib>
